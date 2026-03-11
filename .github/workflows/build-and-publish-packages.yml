@@ -29,64 +29,84 @@ jobs:
       matrix:
         arch: [aarch64, arm, x86_64, i686]
       fail-fast: false
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-      
-      - name: Set up build environment
+
+      - name: Set up Docker
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl wget \
-            git \
-            tar gzip xz-utils \
-            gnupg \
-            aptly
-      
-      - name: Fix permissions
-        run: |
-          chmod +x scripts/*.sh
-          chmod +x *.sh
-      
-      - name: Build packages
-        env:
-          TERMUX_ARCH: ${{ matrix.arch }}
+          docker info
+          echo "[*] Docker is available"
+
+      - name: Determine packages to build
+        id: pkgs
         run: |
           PACKAGES="${{ github.event.inputs.packages }}"
-          
-          if [ "$PACKAGES" = "all" ]; then
+          if [ -z "$PACKAGES" ] || [ "$PACKAGES" = "all" ]; then
             PACKAGES="bash,coreutils,apt,dpkg,termux-tools,termux-keyring,curl,wget,tar,gzip,xz-utils,sed,grep,findutils,diffutils"
           fi
-          
-          echo "Building packages: $PACKAGES"
-          
+          echo "packages=$PACKAGES" >> $GITHUB_OUTPUT
+          echo "[*] Will build: $PACKAGES"
+
+      - name: Build packages using Termux Docker builder
+        run: |
+          PACKAGES="${{ steps.pkgs.outputs.packages }}"
+          ARCH="${{ matrix.arch }}"
+
+          # Map arch names to Termux builder names
+          case "$ARCH" in
+            aarch64) BUILDER_ARCH="aarch64" ;;
+            arm)     BUILDER_ARCH="arm"     ;;
+            x86_64)  BUILDER_ARCH="x86_64"  ;;
+            i686)    BUILDER_ARCH="i686"    ;;
+          esac
+
+          echo "[*] Building for arch: $ARCH"
+          mkdir -p output-debs
+
+          # Pull the official Termux package builder image
+          docker pull ghcr.io/termux/package-builder:latest
+
+          # Build each package inside the container
           IFS=',' read -ra PKG_ARRAY <<< "$PACKAGES"
           for pkg in "${PKG_ARRAY[@]}"; do
             pkg=$(echo "$pkg" | xargs)
-            echo "[*] Building package: $pkg for $TERMUX_ARCH"
-            ./build-package.sh -a $TERMUX_ARCH $pkg || {
-              echo "[!] Failed to build $pkg, continuing..."
-              continue
-            }
+            echo "[*] Building: $pkg for $ARCH"
+
+            docker run --rm \
+              -v "$(pwd):/home/builder/termux-packages" \
+              -v "$(pwd)/output-debs:/home/builder/termux-packages/output" \
+              ghcr.io/termux/package-builder:latest \
+              bash -c "cd /home/builder/termux-packages && ./build-package.sh -a $BUILDER_ARCH -I $pkg" \
+            || echo "[!] Failed to build $pkg, continuing..."
           done
-      
-      - name: Collect built packages
+
+      - name: Verify and collect built packages
         run: |
+          echo "[*] Searching for built .deb files..."
+          find . -name "*.deb" -type f | sort
+
           mkdir -p debs-${{ matrix.arch }}
-          find . -name "*.deb" -type f ! -path "./debs-*" -exec cp {} debs-${{ matrix.arch }}/ \;
-          
-          echo "[*] Built packages for ${{ matrix.arch }}:"
-          ls -lh debs-${{ matrix.arch }}/ || echo "[!] No packages found"
-          
-          if [ -z "$(ls -A debs-${{ matrix.arch }}/)" ]; then
+
+          # Collect from output-debs dir and anywhere else
+          find . -name "*.deb" -type f ! -path "./debs-*" -exec cp -v {} debs-${{ matrix.arch }}/ \;
+
+          echo ""
+          echo "[*] Collected packages for ${{ matrix.arch }}:"
+          ls -lh debs-${{ matrix.arch }}/ || echo "(empty)"
+
+          DEB_COUNT=$(find debs-${{ matrix.arch }} -name "*.deb" | wc -l)
+          echo "[*] Total: $DEB_COUNT .deb files"
+
+          if [ "$DEB_COUNT" -eq 0 ]; then
             echo "[!] ERROR: No .deb files were built for ${{ matrix.arch }}"
+            echo "[!] Check that the package names are valid in your fork."
             exit 1
           fi
-      
+
       - name: Upload packages as artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -98,48 +118,48 @@ jobs:
   create-apt-repository:
     needs: build-packages
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Download all package artifacts
         uses: actions/download-artifact@v4
         with:
           path: all-packages
           pattern: packages-*
           merge-multiple: false
-      
+
       - name: Verify downloaded packages
         run: |
           echo "[*] Checking downloaded artifacts..."
-          
+
           if [ ! -d "all-packages" ]; then
-            echo "[!] ERROR: all-packages directory not found after download!"
+            echo "[!] ERROR: all-packages directory not found!"
             exit 1
           fi
-          
+
           echo "[*] Directory structure:"
           find all-packages -type f | sort
-          
+
           DEB_COUNT=$(find all-packages -name "*.deb" | wc -l)
-          echo "[*] Total .deb files found: $DEB_COUNT"
-          
+          echo "[*] Total .deb files: $DEB_COUNT"
+
           if [ "$DEB_COUNT" -eq 0 ]; then
-            echo "[!] ERROR: No .deb files found in downloaded artifacts!"
+            echo "[!] ERROR: No .deb files in artifacts!"
             exit 1
           fi
-      
-      - name: Install aptly
+
+      - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y aptly gnupg
-      
-      - name: Create GPG key for signing
+          sudo apt-get install -y aptly gnupg dpkg-dev
+
+      - name: Create GPG signing key
         run: |
           if ! gpg --list-keys packages@fl-ide.com > /dev/null 2>&1; then
             cat > /tmp/gpg-batch <<EOF
-          %echo Generating FL_IDE package signing key
+          %echo Generating FL_IDE signing key
           Key-Type: RSA
           Key-Length: 4096
           Subkey-Type: RSA
@@ -154,50 +174,48 @@ jobs:
             gpg --batch --generate-key /tmp/gpg-batch
           fi
           gpg --armor --export packages@fl-ide.com > fl-ide-packages.gpg
-          echo "[*] GPG key exported successfully"
-      
+          echo "[*] GPG key ready"
+
       - name: Create APT repository structure
         run: |
           mkdir -p apt-repo/pool/main
           mkdir -p apt-repo/dists/stable/main
-          
-          # Copy all .deb files from all architecture subdirectories
+
           find all-packages -name "*.deb" -type f | while read deb; do
-            echo "[*] Copying: $deb"
+            echo "[*] Adding: $(basename $deb)"
             cp "$deb" apt-repo/pool/main/
           done
-          
-          echo "[*] Packages in pool:"
-          ls -lh apt-repo/pool/main/
-          
+
           POOL_COUNT=$(find apt-repo/pool/main -name "*.deb" | wc -l)
+          echo "[*] Total in pool: $POOL_COUNT"
+
           if [ "$POOL_COUNT" -eq 0 ]; then
-            echo "[!] ERROR: No packages in pool directory!"
+            echo "[!] ERROR: Pool is empty!"
             exit 1
           fi
-          echo "[*] Total packages in pool: $POOL_COUNT"
-      
-      - name: Create repository metadata per architecture
+
+      - name: Generate Packages metadata per architecture
         run: |
           cd apt-repo
-          
+
           for arch in aarch64 arm x86_64 i686; do
-            echo "[*] Creating metadata for $arch..."
+            echo "[*] Generating metadata for $arch..."
             mkdir -p dists/stable/main/binary-$arch
-            
-            dpkg-scanpackages --arch $arch pool/main /dev/null > dists/stable/main/binary-$arch/Packages 2>/dev/null || \
-            dpkg-scanpackages pool/main /dev/null > dists/stable/main/binary-$arch/Packages
-            
-            gzip -k dists/stable/main/binary-$arch/Packages
-            xz -k dists/stable/main/binary-$arch/Packages
-            
-            echo "[*] Packages for $arch: $(grep -c '^Package:' dists/stable/main/binary-$arch/Packages || echo 0)"
+
+            dpkg-scanpackages --arch $arch pool/main > dists/stable/main/binary-$arch/Packages 2>/dev/null \
+              || dpkg-scanpackages pool/main > dists/stable/main/binary-$arch/Packages
+
+            gzip  -k dists/stable/main/binary-$arch/Packages
+            xz    -k dists/stable/main/binary-$arch/Packages
+
+            PKG_COUNT=$(grep -c '^Package:' dists/stable/main/binary-$arch/Packages || echo 0)
+            echo "[*]   $arch -> $PKG_COUNT packages"
           done
-      
+
       - name: Create Release file
         run: |
           cd apt-repo/dists/stable
-          
+
           cat > Release <<EOF
           Origin: FL_IDE Packages
           Label: FL_IDE
@@ -208,62 +226,50 @@ jobs:
           Description: FL_IDE package repository for com.yato.fl_ide
           Date: $(date -Ru)
           EOF
-          
+
           echo "MD5Sum:" >> Release
           find main -type f | sort | while read f; do
-            size=$(stat -c%s "$f")
-            hash=$(md5sum "$f" | cut -d' ' -f1)
-            printf " %s %8d %s\n" "$hash" "$size" "$f" >> Release
+            printf " %s %8d %s\n" "$(md5sum "$f" | cut -d' ' -f1)" "$(stat -c%s "$f")" "$f" >> Release
           done
-          
+
           echo "SHA256:" >> Release
           find main -type f | sort | while read f; do
-            size=$(stat -c%s "$f")
-            hash=$(sha256sum "$f" | cut -d' ' -f1)
-            printf " %s %8d %s\n" "$hash" "$size" "$f" >> Release
+            printf " %s %8d %s\n" "$(sha256sum "$f" | cut -d' ' -f1)" "$(stat -c%s "$f")" "$f" >> Release
           done
-          
+
           echo "[*] Release file created"
-      
-      - name: Create repository index page
+
+      - name: Copy GPG key to repo
+        run: cp fl-ide-packages.gpg apt-repo/fl-ide-packages.gpg
+
+      - name: Create index page
         run: |
           REPO_OWNER="${{ github.repository_owner }}"
           REPO_NAME="$(echo '${{ github.repository }}' | cut -d'/' -f2)"
-          
           cat > apt-repo/index.html <<EOF
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-              <meta charset="UTF-8">
-              <title>FL_IDE Packages Repository</title>
-              <style>
-                body { font-family: sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
-                code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
-                pre { background: #f4f4f4; padding: 15px; border-radius: 5px; overflow-x: auto; }
-              </style>
-          </head>
-          <body>
-              <h1>🎯 FL_IDE Packages Repository</h1>
-              <p><strong>URL:</strong> <code>https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo</code></p>
-              <h2>Setup</h2>
-              <pre>echo "deb https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo stable main" > \$PREFIX/etc/apt/sources.list.d/fl-ide.list
+          <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+          <title>FL_IDE Packages</title>
+          <style>body{font-family:sans-serif;max-width:800px;margin:50px auto;padding:20px}
+          code{background:#f4f4f4;padding:2px 6px;border-radius:3px}
+          pre{background:#f4f4f4;padding:15px;border-radius:5px;overflow-x:auto}</style>
+          </head><body>
+          <h1>🎯 FL_IDE Packages Repository</h1>
+          <p><strong>URL:</strong> <code>https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo</code></p>
+          <h2>Setup</h2>
+          <pre>echo "deb https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo stable main" > \$PREFIX/etc/apt/sources.list.d/fl-ide.list
           curl -fsSL https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo/fl-ide-packages.gpg | apt-key add -
           apt update</pre>
-          </body>
-          </html>
+          <p>Built: $(date -u '+%Y-%m-%d %H:%M UTC')</p>
+          </body></html>
           EOF
-      
-      - name: Copy GPG key to repo
-        run: |
-          cp fl-ide-packages.gpg apt-repo/fl-ide-packages.gpg
-      
+
       - name: Upload repository artifact
         uses: actions/upload-artifact@v4
         with:
           name: apt-repository
           path: apt-repo/
           retention-days: 90
-      
+
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
@@ -274,18 +280,17 @@ jobs:
           user_name: 'github-actions[bot]'
           user_email: 'github-actions[bot]@users.noreply.github.com'
           commit_message: 'Update APT repository'
-      
-      - name: Create release with packages
+
+      - name: Create GitHub Release with packages
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           RELEASE_TAG="packages-$(date '+%Y.%m.%d-%H%M')"
-          
+
           gh release create "$RELEASE_TAG" \
             --title "FL_IDE Packages - $(date '+%Y-%m-%d %H:%M')" \
-            --notes "Automated package build for com.yato.fl_ide - architectures: aarch64, arm, x86_64, i686" \
-            || echo "[!] Release may already exist, continuing..."
-          
+            --notes "Built for com.yato.fl_ide — architectures: aarch64, arm, x86_64, i686" \
+            || echo "[!] Release tag exists, skipping create"
+
           find apt-repo/pool/main -name "*.deb" -exec gh release upload "$RELEASE_TAG" {} \; || true
-          
           echo "[*] Done: $RELEASE_TAG"
