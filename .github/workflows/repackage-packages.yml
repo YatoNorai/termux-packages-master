@@ -200,19 +200,19 @@ jobs:
 
       - name: Create GPG signing key
         run: |
-          cat > /tmp/gpg-batch <<'GPGEOF'
-          %echo Generating FL_IDE signing key
-          Key-Type: RSA
-          Key-Length: 4096
-          Subkey-Type: RSA
-          Subkey-Length: 4096
-          Name-Real: FL_IDE Package Maintainer
-          Name-Email: packages@fl-ide.com
-          Expire-Date: 0
-          %no-protection
-          %commit
-          %echo done
-          GPGEOF
+          {
+            echo '%echo Generating FL_IDE signing key'
+            echo 'Key-Type: RSA'
+            echo 'Key-Length: 4096'
+            echo 'Subkey-Type: RSA'
+            echo 'Subkey-Length: 4096'
+            echo 'Name-Real: FL_IDE Package Maintainer'
+            echo 'Name-Email: packages@fl-ide.com'
+            echo 'Expire-Date: 0'
+            echo '%no-protection'
+            echo '%commit'
+            echo '%echo done'
+          } > /tmp/gpg-batch
           gpg --batch --generate-key /tmp/gpg-batch
           gpg --armor --export packages@fl-ide.com > fl-ide-packages.gpg
           echo "[*] GPG key ready"
@@ -310,22 +310,6 @@ jobs:
             echo '<p>Packages repackaged from official Termux repository for com.yato.fl_ide</p>'
             echo '</body></html>'
           } > apt-repo/index.html
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          RELEASE_TAG="packages-$(date '+%Y.%m.%d-%H%M')"
-
-          gh release create "$RELEASE_TAG" \
-            --title "FL_IDE Packages - $(date '+%Y-%m-%d %H:%M')" \
-            --notes "Repackaged from official Termux repository for com.yato.fl_ide — aarch64, arm, x86_64, i686" \
-            || echo "[!] Release tag already exists, skipping"
-
-          find apt-repo/pool/main -name "*.deb" \
-            -exec gh release upload "$RELEASE_TAG" {} \; || true
-
-          echo "[*] Done: $RELEASE_TAG"
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
