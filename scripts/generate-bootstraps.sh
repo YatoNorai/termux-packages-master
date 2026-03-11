@@ -2,6 +2,16 @@
 ##
 ##  Script for generating bootstrap archives.
 ##
+##  FL_IDE MODIFICATIONS:
+##  This script has been modified to work with package name 'com.yato.fl_ide'
+##  instead of 'com.termux'. It rewrites package paths during extraction since
+##  official Termux packages contain hardcoded 'com.termux' paths.
+##
+##  Modified sections:
+##  - pull_package(): Extracts to temp dir and rewrites paths
+##  - Metadata generation: Adjusts file lists and checksums
+##  - Maintainer scripts: Rewrites paths in postinst/prerm scripts
+##
 
 set -e
 
@@ -173,14 +183,49 @@ pull_package() {
 				fi
 
 				# Extract files.
-				tar xf "$data_archive" -C "$BOOTSTRAP_ROOTFS"
+				# FL_IDE MODIFICATION: Extract to temp dir first to rewrite paths
+				local temp_extract="$package_tmpdir/temp_extract"
+				mkdir -p "$temp_extract"
+				tar xf "$data_archive" -C "$temp_extract"
+				
+				# Check if package has com.termux paths (from official repo)
+				if [ -d "$temp_extract/data/data/com.termux" ]; then
+					echo "[*] Rewriting paths: com.termux -> com.yato.fl_ide for '$package_name'..."
+					# Create target directory structure
+					mkdir -p "$BOOTSTRAP_ROOTFS/data/data/com.yato.fl_ide"
+					# Copy/move all files from com.termux to com.yato.fl_ide
+					cp -a "$temp_extract/data/data/com.termux/"* "$BOOTSTRAP_ROOTFS/data/data/com.yato.fl_ide/" 2>/dev/null || true
+				else
+					# Package doesn't have com.termux paths, extract normally
+					cp -a "$temp_extract/"* "$BOOTSTRAP_ROOTFS/" 2>/dev/null || true
+				fi
+				
+				# Also copy any other files that might be at root level
+				if [ -d "$temp_extract/data" ]; then
+					# Exclude com.termux since we already handled it
+					find "$temp_extract/data" -mindepth 1 -maxdepth 1 ! -path "$temp_extract/data/data" -exec cp -a {} "$BOOTSTRAP_ROOTFS/data/" \; 2>/dev/null || true
+				fi
 
 				if ! ${BOOTSTRAP_ANDROID10_COMPATIBLE}; then
 					# Register extracted files.
-					tar tf "$data_archive" | sed -E -e 's@^\./@/@' -e 's@^/$@/.@' -e 's@^([^./])@/\1@' > "${BOOTSTRAP_ROOTFS}/${TERMUX_PREFIX}/var/lib/dpkg/info/${package_name}.list"
+					# FL_IDE MODIFICATION: Adjust paths in file list
+					tar tf "$data_archive" | \
+						sed -E -e 's@^\./@/@' -e 's@^/$@/.@' -e 's@^([^./])@/\1@' \
+						-e 's@/data/data/com\.termux/@/data/data/com.yato.fl_ide/@g' \
+						> "${BOOTSTRAP_ROOTFS}/${TERMUX_PREFIX}/var/lib/dpkg/info/${package_name}.list"
 
 					# Generate checksums (md5).
+					# FL_IDE MODIFICATION: Extract to temp, rewrite paths, then generate checksums
+					rm -rf data 2>/dev/null || true
 					tar xf "$data_archive"
+					
+					# Rewrite paths in extracted data if needed
+					if [ -d "data/data/com.termux" ]; then
+						mkdir -p "data/data/com.yato.fl_ide"
+						cp -a data/data/com.termux/* data/data/com.yato.fl_ide/ 2>/dev/null || true
+						rm -rf data/data/com.termux
+					fi
+					
 					find data -type f -print0 | xargs -0 -r md5sum | sed 's@^\.$@@g' > "${BOOTSTRAP_ROOTFS}/${TERMUX_PREFIX}/var/lib/dpkg/info/${package_name}.md5sums"
 
 					# Extract metadata.
@@ -192,9 +237,12 @@ pull_package() {
 					} >> "${BOOTSTRAP_ROOTFS}/${TERMUX_PREFIX}/var/lib/dpkg/status"
 
 					# Additional data: conffiles & scripts
+					# FL_IDE MODIFICATION: Rewrite paths in maintainer scripts
 					for file in conffiles postinst postrm preinst prerm; do
 						if [ -f "${PWD}/${file}" ]; then
-							cp "$file" "${BOOTSTRAP_ROOTFS}/${TERMUX_PREFIX}/var/lib/dpkg/info/${package_name}.${file}"
+							# Rewrite com.termux to com.yato.fl_ide in scripts
+							sed 's@/data/data/com\.termux/@/data/data/com.yato.fl_ide/@g' "${PWD}/${file}" \
+								> "${BOOTSTRAP_ROOTFS}/${TERMUX_PREFIX}/var/lib/dpkg/info/${package_name}.${file}"
 						fi
 					done
 				fi
