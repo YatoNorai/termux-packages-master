@@ -330,24 +330,19 @@ jobs:
           </html>
           EOF
       
-      - name: Upload repository artifact
-        uses: actions/upload-artifact@v4
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: apt-repository
-          path: apt-repo/
-          retention-days: 90
-      
+          path: apt-repo
+
       - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./apt-repo
-          publish_branch: gh-pages
-          force_orphan: true
-          user_name: 'github-actions[bot]'
-          user_email: 'github-actions[bot]@users.noreply.github.com'
-          commit_message: 'Update APT repository'
-      
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+        
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
