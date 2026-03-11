@@ -76,7 +76,7 @@ jobs:
           for pkg in "${PKG_ARRAY[@]}"; do
             pkg=$(echo "$pkg" | xargs)
             echo ""
-            echo "========================================" 
+            echo "========================================"
             echo "[*] Processing: $pkg"
             echo "========================================"
             
@@ -126,7 +126,7 @@ jobs:
             for script in postinst postrm preinst prerm; do
               if [ -f "extract/DEBIAN/$script" ]; then
                 sed -i 's|/data/data/com\.termux|/data/data/com.yato.fl_ide|g' "extract/DEBIAN/$script"
-                chmod +x "extract/DEBIAN/$script"  # Restore execute permission
+                chmod +x "extract/DEBIAN/$script"
               fi
             done
             
@@ -180,7 +180,6 @@ jobs:
           
           if [ "$DEB_COUNT" -eq 0 ]; then
             echo "[!] WARNING: No .deb files were repackaged for ${ARCH}"
-            echo "[!] This might be okay if all packages failed to download"
           fi
       
       - name: Upload packages as artifacts
@@ -226,8 +225,7 @@ jobs:
       
       - name: Create GPG signing key
         run: |
-          if ! gpg --list-keys packages@fl-ide.com > /dev/null 2>&1; then
-            cat > /tmp/gpg-batch <<EOF
+          cat > /tmp/gpg-batch <<EOF
           %echo Generating FL_IDE signing key
           Key-Type: RSA
           Key-Length: 4096
@@ -240,37 +238,47 @@ jobs:
           %commit
           %echo done
           EOF
-            gpg --batch --generate-key /tmp/gpg-batch
-          fi
+          gpg --batch --generate-key /tmp/gpg-batch
           gpg --armor --export packages@fl-ide.com > fl-ide-packages.gpg
           echo "[*] GPG key ready"
       
       - name: Build APT repository
         run: |
           mkdir -p apt-repo/pool/main
-          mkdir -p apt-repo/dists/stable/main
           
-          find all-packages -name "*.deb" -type f | while read deb; do
-            echo "[*] Adding: $(basename "$deb")"
-            cp "$deb" apt-repo/pool/main/
+          # Copy all .deb files into the pool — keep arch-specific subdirs
+          # so dpkg-scanpackages can filter correctly
+          for arch in aarch64 arm x86_64 i686; do
+            if [ -d "all-packages/packages-${arch}" ]; then
+              mkdir -p "apt-repo/pool/main/${arch}"
+              find "all-packages/packages-${arch}" -name "*.deb" -exec cp {} "apt-repo/pool/main/${arch}/" \;
+            fi
           done
           
           cd apt-repo
           for arch in aarch64 arm x86_64 i686; do
             echo "[*] Generating Packages for $arch..."
-            mkdir -p dists/stable/main/binary-$arch
+            mkdir -p "dists/stable/main/binary-${arch}"
             
-            dpkg-scanpackages --arch $arch pool/main > dists/stable/main/binary-$arch/Packages 2>/dev/null \
-              || dpkg-scanpackages pool/main > dists/stable/main/binary-$arch/Packages
+            # Scan only this arch's pool subdir
+            dpkg-scanpackages "pool/main/${arch}" \
+              > "dists/stable/main/binary-${arch}/Packages" 2>/dev/null || true
             
-            gzip -k dists/stable/main/binary-$arch/Packages
-            xz   -k dists/stable/main/binary-$arch/Packages
+            # Fix the Filename paths (remove the arch subdir prefix)
+            sed -i "s|pool/main/${arch}/|pool/main/${arch}/|g" \
+              "dists/stable/main/binary-${arch}/Packages"
             
-            echo "[*]   $arch: $(grep -c '^Package:' dists/stable/main/binary-$arch/Packages || echo 0) packages"
+            gzip  -k "dists/stable/main/binary-${arch}/Packages"
+            xz    -k "dists/stable/main/binary-${arch}/Packages"
+            
+            COUNT=$(grep -c '^Package:' "dists/stable/main/binary-${arch}/Packages" || echo 0)
+            echo "[*]   ${arch}: ${COUNT} packages"
           done
           
+          # Build and sign the Release file
           cd dists/stable
-          cat > Release <<EOF
+          
+          cat > Release <<RELEASE
           Origin: FL_IDE Packages
           Label: FL_IDE
           Suite: stable
@@ -279,7 +287,7 @@ jobs:
           Components: main
           Description: FL_IDE repository for com.yato.fl_ide
           Date: $(date -Ru)
-          EOF
+          RELEASE
           
           echo "MD5Sum:" >> Release
           find main -type f | sort | while read f; do
@@ -290,7 +298,13 @@ jobs:
             printf " %s %8d %s\n" "$(sha256sum "$f" | cut -d' ' -f1)" "$(stat -c%s "$f")" "$f" >> Release
           done
           
-          echo "[*] Release file created"
+          # Sign the Release file (creates InRelease and Release.gpg)
+          gpg --default-key packages@fl-ide.com \
+              --clearsign -o InRelease Release
+          gpg --default-key packages@fl-ide.com \
+              --detach-sign --armor -o Release.gpg Release
+          
+          echo "[*] Release file signed"
       
       - name: Copy GPG key and create index page
         run: |
@@ -314,14 +328,14 @@ jobs:
           <body>
             <h1>🎯 FL_IDE Packages Repository</h1>
             <p><strong>URL:</strong>
-              <code>https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo</code>
+              <code>https://${REPO_OWNER}.github.io/${REPO_NAME}</code>
             </p>
             <h2>Setup</h2>
-            <pre>echo "deb https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo stable main" \\
-            > \$PREFIX/etc/apt/sources.list.d/fl-ide.list
-
-          curl -fsSL https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo/fl-ide-packages.gpg \\
+            <pre>curl -fsSL https://${REPO_OWNER}.github.io/${REPO_NAME}/fl-ide-packages.gpg \
             | apt-key add -
+
+          echo "deb https://${REPO_OWNER}.github.io/${REPO_NAME} stable main" \
+            > \$PREFIX/etc/apt/sources.list.d/fl-ide.list
 
           apt update</pre>
             <p>Built: $(date -u '+%Y-%m-%d %H:%M UTC')</p>
@@ -329,6 +343,22 @@ jobs:
           </body>
           </html>
           EOF
+      
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RELEASE_TAG="packages-$(date '+%Y.%m.%d-%H%M')"
+          
+          gh release create "$RELEASE_TAG" \
+            --title "FL_IDE Packages - $(date '+%Y-%m-%d %H:%M')" \
+            --notes "Repackaged from official Termux repository for com.yato.fl_ide — aarch64, arm, x86_64, i686" \
+            || echo "[!] Release tag already exists, skipping create"
+          
+          find apt-repo/pool/main -name "*.deb" \
+            -exec gh release upload "$RELEASE_TAG" {} \; || true
+          
+          echo "[*] Done: $RELEASE_TAG"
       
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
@@ -351,25 +381,5 @@ jobs:
 
     steps:
       - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
-
-      - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-
-        
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          RELEASE_TAG="packages-$(date '+%Y.%m.%d-%H%M')"
-          
-          gh release create "$RELEASE_TAG" \
-            --title "FL_IDE Packages - $(date '+%Y-%m-%d %H:%M')" \
-            --notes "Repackaged from official Termux repository for com.yato.fl_ide — aarch64, arm, x86_64, i686" \
-            || echo "[!] Release tag already exists, skipping create"
-          
-          find apt-repo/pool/main -name "*.deb" \
-            -exec gh release upload "$RELEASE_TAG" {} \; || true
-          
-          echo "[*] Done: $RELEASE_TAG"
