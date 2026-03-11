@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>FL_IDE Packages Repository</title>
+  <style>
+    body { font-family: sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
+    code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
+    pre  { background: #f4f4f4; padding: 15px; border-radius: 5px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>🎯 FL_IDE Packages Repository</h1>
+  <p><strong>URL:</strong>
+    <code>https://YatoNorai.github.io/termux-packages-master/apt-repo</code>
+  </p>
+  <h2>Setup</h2>
+  <pre>echo "deb https://YatoNorai.github.io/termux-packages-master/apt-repo stable main" \
+  > $PREFIX/etc/apt/sources.list.d/fl-ide.list
+
+curl -fsSL https://YatoNorai.github.io/termux-packages-master/apt-repo/fl-ide-packages.gpg \
+  | apt-key add -
+
+apt update</pre>
+  <p>Built: 2026-03-11 17:31 UTC</p>
+  <p><strong>Note:</strong> Packages repackaged from official Termux repository with paths modified for com.yato.fl_ide</p>
+</body>
+</html>

@@ -1,0 +1,34 @@
+Origin: FL_IDE Packages
+Label: FL_IDE
+Suite: stable
+Codename: stable
+Architectures: aarch64 arm x86_64 i686
+Components: main
+Description: FL_IDE repository for com.yato.fl_ide
+Date: Wed, 11 Mar 2026 17:31:53 +0000
+MD5Sum:
+ d41d8cd98f00b204e9800998ecf8427e        0 main/binary-aarch64/Packages
+ 64d248d02b0b292494a2eb6ebe69e03f       29 main/binary-aarch64/Packages.gz
+ 8dc5aea5b03dff8595f096f9e368e888       32 main/binary-aarch64/Packages.xz
+ d41d8cd98f00b204e9800998ecf8427e        0 main/binary-arm/Packages
+ 64d248d02b0b292494a2eb6ebe69e03f       29 main/binary-arm/Packages.gz
+ 8dc5aea5b03dff8595f096f9e368e888       32 main/binary-arm/Packages.xz
+ d41d8cd98f00b204e9800998ecf8427e        0 main/binary-i686/Packages
+ 64d248d02b0b292494a2eb6ebe69e03f       29 main/binary-i686/Packages.gz
+ 8dc5aea5b03dff8595f096f9e368e888       32 main/binary-i686/Packages.xz
+ d41d8cd98f00b204e9800998ecf8427e        0 main/binary-x86_64/Packages
+ 64d248d02b0b292494a2eb6ebe69e03f       29 main/binary-x86_64/Packages.gz
+ 8dc5aea5b03dff8595f096f9e368e888       32 main/binary-x86_64/Packages.xz
+SHA256:
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855        0 main/binary-aarch64/Packages
+ c2cbcfc5d9dbfe0f08c465afa4e11e798f89fb7b391b58c7b48e6c6e4be4d52d       29 main/binary-aarch64/Packages.gz
+ 0040f94d11d0039505328a90b2ff48968db873e9e7967307631bf40ef5679275       32 main/binary-aarch64/Packages.xz
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855        0 main/binary-arm/Packages
+ c2cbcfc5d9dbfe0f08c465afa4e11e798f89fb7b391b58c7b48e6c6e4be4d52d       29 main/binary-arm/Packages.gz
+ 0040f94d11d0039505328a90b2ff48968db873e9e7967307631bf40ef5679275       32 main/binary-arm/Packages.xz
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855        0 main/binary-i686/Packages
+ c2cbcfc5d9dbfe0f08c465afa4e11e798f89fb7b391b58c7b48e6c6e4be4d52d       29 main/binary-i686/Packages.gz
+ 0040f94d11d0039505328a90b2ff48968db873e9e7967307631bf40ef5679275       32 main/binary-i686/Packages.xz
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855        0 main/binary-x86_64/Packages
+ c2cbcfc5d9dbfe0f08c465afa4e11e798f89fb7b391b58c7b48e6c6e4be4d52d       29 main/binary-x86_64/Packages.gz
+ 0040f94d11d0039505328a90b2ff48968db873e9e7967307631bf40ef5679275       32 main/binary-x86_64/Packages.xz
