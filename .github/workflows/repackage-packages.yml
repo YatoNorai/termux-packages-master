@@ -126,6 +126,7 @@ jobs:
             for script in postinst postrm preinst prerm; do
               if [ -f "extract/DEBIAN/$script" ]; then
                 sed -i 's|/data/data/com\.termux|/data/data/com.yato.fl_ide|g' "extract/DEBIAN/$script"
+                chmod +x "extract/DEBIAN/$script"  # Restore execute permission
               fi
             done
             
