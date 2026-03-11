@@ -1,0 +1,218 @@
+name: Generate Bootstrap Archives from Custom Packages
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Build and Publish Packages"]
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  generate-bootstraps:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [aarch64, arm, x86_64, i686]
+      fail-fast: false
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            curl wget \
+            tar gzip xz-utils \
+            jq \
+            zip unzip
+      
+      - name: Fix permissions
+        run: |
+          chmod +x scripts/*.sh
+          chmod +x *.sh
+      
+      - name: Configure to use custom repository
+        run: |
+          # Update properties.sh to use our custom repo
+          REPO_URL="https://${{ github.repository_owner }}.github.io/$(echo ${{ github.repository }} | cut -d'/' -f2)/apt-repo"
+          
+          echo "[*] Configuring custom repository: $REPO_URL"
+          
+          # Backup original
+          cp scripts/properties.sh scripts/properties.sh.backup
+          
+          # Update repository URLs in generate-bootstraps.sh
+          sed -i 's|https://packages-cf.termux.dev/apt/termux-main|'"$REPO_URL"'|g' scripts/generate-bootstraps.sh
+          sed -i 's|https://packages.termux.dev/apt/termux-main|'"$REPO_URL"'|g' scripts/generate-bootstraps.sh
+      
+      - name: Wait for GitHub Pages to be ready
+        run: |
+          REPO_URL="https://${{ github.repository_owner }}.github.io/$(echo ${{ github.repository }} | cut -d'/' -f2)/apt-repo"
+          
+          echo "[*] Waiting for GitHub Pages repository to be available..."
+          
+          for i in {1..30}; do
+            if curl -f -s "$REPO_URL/dists/stable/Release" > /dev/null 2>&1; then
+              echo "[*] Repository is available!"
+              break
+            fi
+            echo "Attempt $i/30: Repository not ready yet, waiting 10s..."
+            sleep 10
+          done
+      
+      - name: Generate bootstrap archive
+        run: |
+          echo "[*] Generating bootstrap for architecture: ${{ matrix.arch }}"
+          
+          # Generate bootstrap using our custom packages
+          ./scripts/generate-bootstraps.sh --architectures ${{ matrix.arch }} || {
+            echo "[!] Failed to generate bootstrap, checking logs..."
+            exit 1
+          }
+          
+          # Verify bootstrap was created
+          if [ -f "bootstrap-${{ matrix.arch }}.zip" ]; then
+            echo "[*] Bootstrap created successfully!"
+            ls -lh bootstrap-${{ matrix.arch }}.zip
+            
+            # Extract and verify contents
+            unzip -l bootstrap-${{ matrix.arch }}.zip | head -20
+            
+            SIZE=$(stat -f%z bootstrap-${{ matrix.arch }}.zip 2>/dev/null || stat -c%s bootstrap-${{ matrix.arch }}.zip)
+            echo "[*] Bootstrap size: $SIZE bytes"
+            
+            if [ "$SIZE" -lt 1000000 ]; then
+              echo "[!] WARNING: Bootstrap seems too small!"
+            fi
+          else
+            echo "[!] Bootstrap file not found!"
+            exit 1
+          fi
+      
+      - name: Upload bootstrap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-${{ matrix.arch }}
+          path: bootstrap-${{ matrix.arch }}.zip
+          retention-days: 90
+  
+  publish-bootstraps:
+    needs: generate-bootstraps
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Download all bootstrap artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bootstraps
+      
+      - name: List downloaded bootstraps
+        run: |
+          echo "[*] Downloaded bootstraps:"
+          find bootstraps -name "*.zip" -exec ls -lh {} \;
+      
+      - name: Create release tag
+        id: create_tag
+        run: |
+          TAG="bootstrap-$(date '+%Y.%m.%d')"
+          COUNTER=1
+          
+          # Check if tag exists and increment
+          while git rev-parse "$TAG-r$COUNTER" >/dev/null 2>&1; do
+            COUNTER=$((COUNTER + 1))
+          done
+          
+          FINAL_TAG="$TAG-r$COUNTER+fl_ide"
+          echo "tag=$FINAL_TAG" >> $GITHUB_OUTPUT
+          echo "[*] Release tag: $FINAL_TAG"
+      
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.create_tag.outputs.tag }}"
+          
+          # Create release notes
+          cat > release_notes.md <<'EOF'
+          # 🎉 FL_IDE Bootstrap Archives
+          
+          Bootstrap archives compiled with **com.yato.fl_ide** package name.
+          
+          ## 📦 What's Included
+          
+          - **aarch64**: ARM 64-bit devices
+          - **arm**: ARM 32-bit devices  
+          - **x86_64**: Intel/AMD 64-bit
+          - **i686**: Intel/AMD 32-bit
+          
+          ## 🚀 Usage in FL_IDE App
+          
+          ```java
+          // 1. Download appropriate bootstrap for device
+          String arch = getDeviceArchitecture(); // aarch64, arm, x86_64, i686
+          String url = "https://github.com/${{ github.repository }}/releases/download/" + tag + "/bootstrap-" + arch + ".zip";
+          
+          // 2. Extract to FL_IDE prefix
+          File prefix = new File("/data/data/com.yato.fl_ide/files/usr");
+          extractBootstrap(downloadedFile, prefix);
+          
+          // 3. Process symlinks
+          processSymlinks(new File(prefix, "SYMLINKS.txt"));
+          
+          // 4. Run second stage (optional - runs automatically on first shell)
+          runSecondStage();
+          ```
+          
+          ## 📊 Package Source
+          
+          All packages compiled from source with hardcoded paths:
+          - **Package Name**: com.yato.fl_ide  
+          - **Prefix**: /data/data/com.yato.fl_ide/files/usr
+          - **Home**: /data/data/com.yato.fl_ide/files/home
+          
+          ## 🔗 APT Repository
+          
+          After bootstrap installation, packages are available via APT:
+          
+          ```bash
+          apt update
+          apt install <package-name>
+          ```
+          
+          Repository URL: `https://${{ github.repository_owner }}.github.io/$(echo ${{ github.repository }} | cut -d'/' -f2)/apt-repo`
+          
+          ## ✅ Verified
+          
+          - [x] All architectures built successfully
+          - [x] Package metadata correct
+          - [x] Second stage scripts included
+          - [x] APT configuration included
+          
+          ---
+          
+          **Built**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          **Commit**: ${{ github.sha }}
+          EOF
+          
+          # Create release
+          gh release create "$TAG" \
+            --title "Bootstrap Archives - FL_IDE ($(date '+%Y-%m-%d'))" \
+            --notes-file release_notes.md \
+            --latest=false
+          
+          # Upload bootstrap files
+          find bootstraps -name "bootstrap-*.zip" -exec gh release upload "$TAG" {} \;
+          
+          echo "[*] Release published: $TAG"
