@@ -1,0 +1,363 @@
+name: Repackage and Publish Termux Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: 'Packages to download and repackage (comma-separated, or "all" for essentials)'
+        required: true
+        default: 'bash,coreutils,apt,dpkg,termux-tools'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/repackage-packages.yml'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  repackage-packages:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [aarch64, arm, x86_64, i686]
+      fail-fast: false
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            curl wget \
+            dpkg-deb \
+            gzip xz-utils \
+            jq
+      
+      - name: Determine packages to process
+        id: pkgs
+        run: |
+          PACKAGES="${{ github.event.inputs.packages }}"
+          if [ -z "$PACKAGES" ] || [ "$PACKAGES" = "all" ]; then
+            PACKAGES="bash,coreutils,apt,dpkg,termux-tools,termux-keyring,curl,wget,tar,gzip,xz-utils,sed,grep,findutils,diffutils,ncurses,readline,libc++,libandroid-support"
+          fi
+          echo "packages=$PACKAGES" >> $GITHUB_OUTPUT
+          echo "[*] Will process: $PACKAGES"
+      
+      - name: Download and repackage packages
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -e
+          
+          PACKAGES="${{ steps.pkgs.outputs.packages }}"
+          OFFICIAL_REPO="https://packages-cf.termux.dev/apt/termux-main"
+          
+          mkdir -p work/${ARCH}
+          mkdir -p debs-${ARCH}
+          cd work/${ARCH}
+          
+          echo "[*] Downloading package list..."
+          curl -fsSL "${OFFICIAL_REPO}/dists/stable/main/binary-${ARCH}/Packages" > Packages
+          
+          echo "[*] Processing packages..."
+          IFS=',' read -ra PKG_ARRAY <<< "$PACKAGES"
+          
+          for pkg in "${PKG_ARRAY[@]}"; do
+            pkg=$(echo "$pkg" | xargs)
+            echo ""
+            echo "========================================" 
+            echo "[*] Processing: $pkg"
+            echo "========================================"
+            
+            # Find package info
+            PACKAGE_INFO=$(awk -v pkg="$pkg" '
+              /^Package:/ { if ($2 == pkg) found=1; else found=0 }
+              found { print }
+              /^$/ { if (found) exit }
+            ' Packages)
+            
+            if [ -z "$PACKAGE_INFO" ]; then
+              echo "[!] Package $pkg not found in repository"
+              continue
+            fi
+            
+            # Extract filename
+            FILENAME=$(echo "$PACKAGE_INFO" | grep "^Filename:" | awk '{print $2}')
+            if [ -z "$FILENAME" ]; then
+              echo "[!] No filename found for $pkg"
+              continue
+            fi
+            
+            PACKAGE_URL="${OFFICIAL_REPO}/${FILENAME}"
+            DEB_FILE=$(basename "$FILENAME")
+            
+            echo "[*] Downloading: $PACKAGE_URL"
+            curl -fsSL "$PACKAGE_URL" -o "$DEB_FILE" || {
+              echo "[!] Failed to download $pkg"
+              continue
+            }
+            
+            # Extract .deb
+            echo "[*] Extracting: $DEB_FILE"
+            rm -rf extract
+            mkdir -p extract
+            dpkg-deb -R "$DEB_FILE" extract/
+            
+            # Rewrite paths in all text files
+            echo "[*] Rewriting paths: com.termux -> com.yato.fl_ide"
+            
+            # Rewrite in control file
+            if [ -f extract/DEBIAN/control ]; then
+              sed -i 's|/data/data/com\.termux|/data/data/com.yato.fl_ide|g' extract/DEBIAN/control
+            fi
+            
+            # Rewrite in maintainer scripts
+            for script in postinst postrm preinst prerm; do
+              if [ -f "extract/DEBIAN/$script" ]; then
+                sed -i 's|/data/data/com\.termux|/data/data/com.yato.fl_ide|g' "extract/DEBIAN/$script"
+              fi
+            done
+            
+            # Rewrite in conffiles
+            if [ -f extract/DEBIAN/conffiles ]; then
+              sed -i 's|/data/data/com\.termux|/data/data/com.yato.fl_ide|g' extract/DEBIAN/conffiles
+            fi
+            
+            # Move actual files from com.termux to com.yato.fl_ide
+            if [ -d extract/data/data/com.termux ]; then
+              echo "[*] Moving files: data/data/com.termux -> data/data/com.yato.fl_ide"
+              mkdir -p extract/data/data/com.yato.fl_ide
+              mv extract/data/data/com.termux/* extract/data/data/com.yato.fl_ide/ 2>/dev/null || true
+              rmdir extract/data/data/com.termux 2>/dev/null || true
+            fi
+            
+            # Rewrite paths in shell scripts
+            find extract/data -type f -name "*.sh" 2>/dev/null | while read f; do
+              if file "$f" | grep -q "text"; then
+                sed -i 's|/data/data/com\.termux|/data/data/com.yato.fl_ide|g' "$f"
+              fi
+            done
+            
+            # Rewrite paths in config files
+            find extract/data -type f \( -name "*.conf" -o -name "*.cfg" \) 2>/dev/null | while read f; do
+              if file "$f" | grep -q "text"; then
+                sed -i 's|/data/data/com\.termux|/data/data/com.yato.fl_ide|g' "$f"
+              fi
+            done
+            
+            # Repackage
+            NEW_DEB="${DEB_FILE%.deb}-fl_ide.deb"
+            echo "[*] Repackaging as: $NEW_DEB"
+            dpkg-deb -b extract "$NEW_DEB"
+            
+            # Move to output
+            mv "$NEW_DEB" "../../debs-${ARCH}/"
+            
+            echo "[✓] SUCCESS: $pkg"
+            rm -rf extract "$DEB_FILE"
+          done
+          
+          cd ../..
+          
+          echo ""
+          echo "[*] Final packages for ${ARCH}:"
+          ls -lh debs-${ARCH}/
+          
+          DEB_COUNT=$(find debs-${ARCH} -name "*.deb" | wc -l)
+          echo "[*] Total: $DEB_COUNT .deb files"
+          
+          if [ "$DEB_COUNT" -eq 0 ]; then
+            echo "[!] WARNING: No .deb files were repackaged for ${ARCH}"
+            echo "[!] This might be okay if all packages failed to download"
+          fi
+      
+      - name: Upload packages as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.arch }}
+          path: debs-${{ matrix.arch }}/*.deb
+          if-no-files-found: warn
+          retention-days: 30
+
+  create-apt-repository:
+    needs: repackage-packages
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Download all package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-packages
+          pattern: packages-*
+          merge-multiple: false
+      
+      - name: Verify downloaded packages
+        run: |
+          echo "[*] Downloaded artifacts:"
+          find all-packages -type f | sort
+          
+          DEB_COUNT=$(find all-packages -name "*.deb" | wc -l)
+          echo "[*] Total .deb files: $DEB_COUNT"
+          
+          if [ "$DEB_COUNT" -eq 0 ]; then
+            echo "[!] ERROR: No .deb files in artifacts!"
+            exit 1
+          fi
+      
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnupg dpkg-dev
+      
+      - name: Create GPG signing key
+        run: |
+          if ! gpg --list-keys packages@fl-ide.com > /dev/null 2>&1; then
+            cat > /tmp/gpg-batch <<EOF
+          %echo Generating FL_IDE signing key
+          Key-Type: RSA
+          Key-Length: 4096
+          Subkey-Type: RSA
+          Subkey-Length: 4096
+          Name-Real: FL_IDE Package Maintainer
+          Name-Email: packages@fl-ide.com
+          Expire-Date: 0
+          %no-protection
+          %commit
+          %echo done
+          EOF
+            gpg --batch --generate-key /tmp/gpg-batch
+          fi
+          gpg --armor --export packages@fl-ide.com > fl-ide-packages.gpg
+          echo "[*] GPG key ready"
+      
+      - name: Build APT repository
+        run: |
+          mkdir -p apt-repo/pool/main
+          mkdir -p apt-repo/dists/stable/main
+          
+          find all-packages -name "*.deb" -type f | while read deb; do
+            echo "[*] Adding: $(basename "$deb")"
+            cp "$deb" apt-repo/pool/main/
+          done
+          
+          cd apt-repo
+          for arch in aarch64 arm x86_64 i686; do
+            echo "[*] Generating Packages for $arch..."
+            mkdir -p dists/stable/main/binary-$arch
+            
+            dpkg-scanpackages --arch $arch pool/main > dists/stable/main/binary-$arch/Packages 2>/dev/null \
+              || dpkg-scanpackages pool/main > dists/stable/main/binary-$arch/Packages
+            
+            gzip -k dists/stable/main/binary-$arch/Packages
+            xz   -k dists/stable/main/binary-$arch/Packages
+            
+            echo "[*]   $arch: $(grep -c '^Package:' dists/stable/main/binary-$arch/Packages || echo 0) packages"
+          done
+          
+          cd dists/stable
+          cat > Release <<EOF
+          Origin: FL_IDE Packages
+          Label: FL_IDE
+          Suite: stable
+          Codename: stable
+          Architectures: aarch64 arm x86_64 i686
+          Components: main
+          Description: FL_IDE repository for com.yato.fl_ide
+          Date: $(date -Ru)
+          EOF
+          
+          echo "MD5Sum:" >> Release
+          find main -type f | sort | while read f; do
+            printf " %s %8d %s\n" "$(md5sum "$f" | cut -d' ' -f1)" "$(stat -c%s "$f")" "$f" >> Release
+          done
+          echo "SHA256:" >> Release
+          find main -type f | sort | while read f; do
+            printf " %s %8d %s\n" "$(sha256sum "$f" | cut -d' ' -f1)" "$(stat -c%s "$f")" "$f" >> Release
+          done
+          
+          echo "[*] Release file created"
+      
+      - name: Copy GPG key and create index page
+        run: |
+          cp fl-ide-packages.gpg apt-repo/fl-ide-packages.gpg
+          
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME="$(echo '${{ github.repository }}' | cut -d'/' -f2)"
+          
+          cat > apt-repo/index.html <<EOF
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <title>FL_IDE Packages Repository</title>
+            <style>
+              body { font-family: sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
+              code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
+              pre  { background: #f4f4f4; padding: 15px; border-radius: 5px; overflow-x: auto; }
+            </style>
+          </head>
+          <body>
+            <h1>🎯 FL_IDE Packages Repository</h1>
+            <p><strong>URL:</strong>
+              <code>https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo</code>
+            </p>
+            <h2>Setup</h2>
+            <pre>echo "deb https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo stable main" \\
+            > \$PREFIX/etc/apt/sources.list.d/fl-ide.list
+
+          curl -fsSL https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo/fl-ide-packages.gpg \\
+            | apt-key add -
+
+          apt update</pre>
+            <p>Built: $(date -u '+%Y-%m-%d %H:%M UTC')</p>
+            <p><strong>Note:</strong> Packages repackaged from official Termux repository with paths modified for com.yato.fl_ide</p>
+          </body>
+          </html>
+          EOF
+      
+      - name: Upload repository artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apt-repository
+          path: apt-repo/
+          retention-days: 90
+      
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./apt-repo
+          publish_branch: gh-pages
+          force_orphan: true
+          user_name: 'github-actions[bot]'
+          user_email: 'github-actions[bot]@users.noreply.github.com'
+          commit_message: 'Update APT repository'
+      
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RELEASE_TAG="packages-$(date '+%Y.%m.%d-%H%M')"
+          
+          gh release create "$RELEASE_TAG" \
+            --title "FL_IDE Packages - $(date '+%Y-%m-%d %H:%M')" \
+            --notes "Repackaged from official Termux repository for com.yato.fl_ide — aarch64, arm, x86_64, i686" \
+            || echo "[!] Release tag already exists, skipping create"
+          
+          find apt-repo/pool/main -name "*.deb" \
+            -exec gh release upload "$RELEASE_TAG" {} \; || true
+          
+          echo "[*] Done: $RELEASE_TAG"
