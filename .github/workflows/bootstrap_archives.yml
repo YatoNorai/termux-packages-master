@@ -36,13 +36,11 @@ jobs:
       
       - name: Create bootstrap archive
         run: ./scripts/generate-bootstraps.sh --architectures ${{ matrix.arch }}
-      
       - name: Store artifacts
         uses: actions/upload-artifact@v4
         with:
           name: bootstrap-archives-${{ matrix.arch }}-${{ github.sha }}
           path: "*.zip"
-  
   publish:
     permissions:
       contents: write # for git push
@@ -59,7 +57,6 @@ jobs:
         with:
           merge-multiple: true
           path: ./
-      
       - name: Create new tag
         id: get_tag
         run: |
@@ -72,7 +69,6 @@ jobs:
           fi
           new_tag="${new_tag}-r${tag_rev}+apt.android-7"
           echo "tag_name=$new_tag" >> $GITHUB_OUTPUT
-      
       - name: Publish bootstrap zips to GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
