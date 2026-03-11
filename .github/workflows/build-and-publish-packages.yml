@@ -36,17 +36,19 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Fix permissions on all scripts (sh + py)
+      - name: Enable FUSE support on host
         run: |
-          # Fix ALL executable scripts - sh, bash, py
-          find . -name "*.sh"  -type f -exec chmod +x {} \;
-          find . -name "*.py"  -type f -exec chmod +x {} \;
+          sudo apt-get install -y fuse3 fuse-overlayfs || true
+          sudo modprobe fuse || true
+          echo "[*] FUSE setup done"
+          ls /dev/fuse && echo "[*] /dev/fuse exists" || echo "[!] /dev/fuse not found"
+
+      - name: Fix permissions on all scripts
+        run: |
+          find . -name "*.sh" -type f -exec chmod +x {} \;
+          find . -name "*.py" -type f -exec chmod +x {} \;
           chmod +x build-package.sh
           echo "[*] Permissions fixed"
-          echo "[*] Sample check:"
-          ls -la build-package.sh
-          ls -la scripts/build/termux_get_repo_files.sh 2>/dev/null || true
-          ls -la scripts/get_hash_from_file.py 2>/dev/null || true
 
       - name: Determine packages to build
         id: pkgs
@@ -82,6 +84,8 @@ jobs:
             echo "========================================"
 
             docker run --rm \
+              --privileged \
+              --device /dev/fuse \
               -v "$(pwd):/home/builder/termux-packages" \
               -v "$(pwd)/output-debs:/home/builder/termux-packages/output" \
               -e TERMUX_MAKE_PROCESSES="$(nproc)" \
@@ -90,7 +94,7 @@ jobs:
                 set -e
                 cd /home/builder/termux-packages
 
-                # Fix ALL script permissions inside container
+                # Fix permissions inside container
                 find . -name '*.sh' -type f -exec chmod +x {} \;
                 find . -name '*.py' -type f -exec chmod +x {} \;
                 chmod +x build-package.sh
