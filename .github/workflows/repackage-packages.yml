@@ -336,7 +336,22 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: apt-repo
+          path: ./apt-repo
+
+  deploy-pages:
+    needs: create-apt-repository
+    runs-on: ubuntu-latest
+
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+
+    steps:
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
 
       - name: Deploy to GitHub Pages
         id: deployment
