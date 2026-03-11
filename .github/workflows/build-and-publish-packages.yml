@@ -36,10 +36,22 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Set up Docker
+      - name: Inspect repository structure
         run: |
-          docker info
-          echo "[*] Docker is available"
+          echo "=== Root files ==="
+          ls -la
+          echo ""
+          echo "=== scripts/ ==="
+          ls -la scripts/ 2>/dev/null || echo "(no scripts/ dir)"
+          echo ""
+          echo "=== packages/ (first 20) ==="
+          ls packages/ 2>/dev/null | head -20 || echo "(no packages/ dir)"
+          echo ""
+          echo "=== build-package.sh exists? ==="
+          [ -f build-package.sh ] && echo "YES" || echo "NO - build-package.sh not found!"
+          echo ""
+          echo "=== Dockerfile or docker/ ==="
+          find . -name "Dockerfile" -o -name "*.dockerfile" 2>/dev/null | head -10
 
       - name: Determine packages to build
         id: pkgs
@@ -51,59 +63,124 @@ jobs:
           echo "packages=$PACKAGES" >> $GITHUB_OUTPUT
           echo "[*] Will build: $PACKAGES"
 
+      - name: Pull Termux package builder image
+        run: |
+          echo "[*] Pulling builder image..."
+          docker pull ghcr.io/termux/package-builder:latest
+          echo "[*] Image pulled successfully"
+          docker inspect ghcr.io/termux/package-builder:latest | grep -E '"WorkingDir"|"Entrypoint"|"Cmd"'
+
+      - name: Test Docker mount and workspace
+        run: |
+          echo "[*] Testing container access to workspace..."
+          docker run --rm \
+            -v "$(pwd):/home/builder/termux-packages" \
+            ghcr.io/termux/package-builder:latest \
+            bash -c "
+              echo '=== Container user ==='
+              whoami
+              echo ''
+              echo '=== Workspace contents ==='
+              ls -la /home/builder/termux-packages/ | head -20
+              echo ''
+              echo '=== build-package.sh ==='
+              ls -la /home/builder/termux-packages/build-package.sh || echo 'NOT FOUND'
+              echo ''
+              echo '=== packages/ dir ==='
+              ls /home/builder/termux-packages/packages/ | head -10 || echo 'NOT FOUND'
+            "
+
       - name: Build packages using Termux Docker builder
         run: |
           PACKAGES="${{ steps.pkgs.outputs.packages }}"
           ARCH="${{ matrix.arch }}"
 
-          # Map arch names to Termux builder names
-          case "$ARCH" in
-            aarch64) BUILDER_ARCH="aarch64" ;;
-            arm)     BUILDER_ARCH="arm"     ;;
-            x86_64)  BUILDER_ARCH="x86_64"  ;;
-            i686)    BUILDER_ARCH="i686"    ;;
-          esac
+          mkdir -p "$(pwd)/output-debs"
+          chmod 777 "$(pwd)/output-debs"
 
           echo "[*] Building for arch: $ARCH"
-          mkdir -p output-debs
+          echo "[*] Packages: $PACKAGES"
+          echo "[*] Output dir: $(pwd)/output-debs"
 
-          # Pull the official Termux package builder image
-          docker pull ghcr.io/termux/package-builder:latest
-
-          # Build each package inside the container
           IFS=',' read -ra PKG_ARRAY <<< "$PACKAGES"
+          BUILT=0
+          FAILED=0
+
           for pkg in "${PKG_ARRAY[@]}"; do
             pkg=$(echo "$pkg" | xargs)
+            echo ""
+            echo "========================================"
             echo "[*] Building: $pkg for $ARCH"
+            echo "========================================"
 
+            # Run build inside container - NO silent failure
             docker run --rm \
               -v "$(pwd):/home/builder/termux-packages" \
               -v "$(pwd)/output-debs:/home/builder/termux-packages/output" \
+              -e TERMUX_ARCH="$ARCH" \
               ghcr.io/termux/package-builder:latest \
-              bash -c "cd /home/builder/termux-packages && ./build-package.sh -a $BUILDER_ARCH -I $pkg" \
-            || echo "[!] Failed to build $pkg, continuing..."
+              bash -c "
+                set -e
+                cd /home/builder/termux-packages
+                echo '[container] Starting build of $pkg for $ARCH'
+                ./build-package.sh -a $ARCH -I '$pkg' 2>&1
+                echo '[container] Build finished'
+              " \
+            && {
+              echo "[*] SUCCESS: $pkg"
+              BUILT=$((BUILT + 1))
+            } || {
+              echo "[!] FAILED: $pkg"
+              FAILED=$((FAILED + 1))
+            }
           done
 
-      - name: Verify and collect built packages
-        run: |
-          echo "[*] Searching for built .deb files..."
+          echo ""
+          echo "=== Build Summary ==="
+          echo "Built:  $BUILT"
+          echo "Failed: $FAILED"
+          echo ""
+          echo "[*] Output directory contents:"
+          ls -lh "$(pwd)/output-debs/" || echo "(empty)"
+          echo ""
+          echo "[*] All .deb files found anywhere:"
           find . -name "*.deb" -type f | sort
 
+      - name: Collect built packages
+        run: |
           mkdir -p debs-${{ matrix.arch }}
 
-          # Collect from output-debs dir and anywhere else
-          find . -name "*.deb" -type f ! -path "./debs-*" -exec cp -v {} debs-${{ matrix.arch }}/ \;
+          # Collect from output-debs first
+          if [ -d "output-debs" ] && [ -n "$(ls output-debs/*.deb 2>/dev/null)" ]; then
+            cp -v output-debs/*.deb debs-${{ matrix.arch }}/
+          fi
+
+          # Also search anywhere else in workspace
+          find . -name "*.deb" -type f \
+            ! -path "./debs-*" \
+            ! -path "./output-debs/*" \
+            -exec cp -v {} debs-${{ matrix.arch }}/ \;
 
           echo ""
-          echo "[*] Collected packages for ${{ matrix.arch }}:"
+          echo "[*] Final packages for ${{ matrix.arch }}:"
           ls -lh debs-${{ matrix.arch }}/ || echo "(empty)"
 
           DEB_COUNT=$(find debs-${{ matrix.arch }} -name "*.deb" | wc -l)
           echo "[*] Total: $DEB_COUNT .deb files"
 
           if [ "$DEB_COUNT" -eq 0 ]; then
-            echo "[!] ERROR: No .deb files were built for ${{ matrix.arch }}"
-            echo "[!] Check that the package names are valid in your fork."
+            echo ""
+            echo "========================================"
+            echo "[!] ERROR: No .deb files were built!"
+            echo ""
+            echo "Possible causes:"
+            echo "  1. Package names don't exist in your fork's packages/ dir"
+            echo "  2. build-package.sh failed inside Docker (check logs above)"
+            echo "  3. Output path mismatch inside the container"
+            echo ""
+            echo "Available packages in this repo:"
+            ls packages/ | head -30 || echo "(cannot list packages/)"
+            echo "========================================"
             exit 1
           fi
 
@@ -132,14 +209,7 @@ jobs:
 
       - name: Verify downloaded packages
         run: |
-          echo "[*] Checking downloaded artifacts..."
-
-          if [ ! -d "all-packages" ]; then
-            echo "[!] ERROR: all-packages directory not found!"
-            exit 1
-          fi
-
-          echo "[*] Directory structure:"
+          echo "[*] Downloaded artifacts:"
           find all-packages -type f | sort
 
           DEB_COUNT=$(find all-packages -name "*.deb" | wc -l)
@@ -153,7 +223,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y aptly gnupg dpkg-dev
+          sudo apt-get install -y gnupg dpkg-dev
 
       - name: Create GPG signing key
         run: |
@@ -176,7 +246,7 @@ jobs:
           gpg --armor --export packages@fl-ide.com > fl-ide-packages.gpg
           echo "[*] GPG key ready"
 
-      - name: Create APT repository structure
+      - name: Build APT repository
         run: |
           mkdir -p apt-repo/pool/main
           mkdir -p apt-repo/dists/stable/main
@@ -186,36 +256,19 @@ jobs:
             cp "$deb" apt-repo/pool/main/
           done
 
-          POOL_COUNT=$(find apt-repo/pool/main -name "*.deb" | wc -l)
-          echo "[*] Total in pool: $POOL_COUNT"
-
-          if [ "$POOL_COUNT" -eq 0 ]; then
-            echo "[!] ERROR: Pool is empty!"
-            exit 1
-          fi
-
-      - name: Generate Packages metadata per architecture
-        run: |
+          # Generate per-arch Packages files
           cd apt-repo
-
           for arch in aarch64 arm x86_64 i686; do
-            echo "[*] Generating metadata for $arch..."
             mkdir -p dists/stable/main/binary-$arch
-
             dpkg-scanpackages --arch $arch pool/main > dists/stable/main/binary-$arch/Packages 2>/dev/null \
               || dpkg-scanpackages pool/main > dists/stable/main/binary-$arch/Packages
-
-            gzip  -k dists/stable/main/binary-$arch/Packages
-            xz    -k dists/stable/main/binary-$arch/Packages
-
-            PKG_COUNT=$(grep -c '^Package:' dists/stable/main/binary-$arch/Packages || echo 0)
-            echo "[*]   $arch -> $PKG_COUNT packages"
+            gzip -k dists/stable/main/binary-$arch/Packages
+            xz   -k dists/stable/main/binary-$arch/Packages
+            echo "[*] $arch: $(grep -c '^Package:' dists/stable/main/binary-$arch/Packages || echo 0) packages"
           done
 
-      - name: Create Release file
-        run: |
-          cd apt-repo/dists/stable
-
+          # Release file
+          cd dists/stable
           cat > Release <<EOF
           Origin: FL_IDE Packages
           Label: FL_IDE
@@ -223,7 +276,7 @@ jobs:
           Codename: stable
           Architectures: aarch64 arm x86_64 i686
           Components: main
-          Description: FL_IDE package repository for com.yato.fl_ide
+          Description: FL_IDE repository for com.yato.fl_ide
           Date: $(date -Ru)
           EOF
 
@@ -231,31 +284,21 @@ jobs:
           find main -type f | sort | while read f; do
             printf " %s %8d %s\n" "$(md5sum "$f" | cut -d' ' -f1)" "$(stat -c%s "$f")" "$f" >> Release
           done
-
           echo "SHA256:" >> Release
           find main -type f | sort | while read f; do
             printf " %s %8d %s\n" "$(sha256sum "$f" | cut -d' ' -f1)" "$(stat -c%s "$f")" "$f" >> Release
           done
 
-          echo "[*] Release file created"
-
-      - name: Copy GPG key to repo
-        run: cp fl-ide-packages.gpg apt-repo/fl-ide-packages.gpg
-
-      - name: Create index page
+      - name: Copy GPG key and create index
         run: |
+          cp fl-ide-packages.gpg apt-repo/fl-ide-packages.gpg
           REPO_OWNER="${{ github.repository_owner }}"
           REPO_NAME="$(echo '${{ github.repository }}' | cut -d'/' -f2)"
           cat > apt-repo/index.html <<EOF
-          <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
-          <title>FL_IDE Packages</title>
-          <style>body{font-family:sans-serif;max-width:800px;margin:50px auto;padding:20px}
-          code{background:#f4f4f4;padding:2px 6px;border-radius:3px}
-          pre{background:#f4f4f4;padding:15px;border-radius:5px;overflow-x:auto}</style>
-          </head><body>
-          <h1>🎯 FL_IDE Packages Repository</h1>
-          <p><strong>URL:</strong> <code>https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo</code></p>
-          <h2>Setup</h2>
+          <!DOCTYPE html><html><head><meta charset="UTF-8"><title>FL_IDE Repo</title></head>
+          <body>
+          <h1>FL_IDE Packages Repository</h1>
+          <p><code>https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo</code></p>
           <pre>echo "deb https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo stable main" > \$PREFIX/etc/apt/sources.list.d/fl-ide.list
           curl -fsSL https://${REPO_OWNER}.github.io/${REPO_NAME}/apt-repo/fl-ide-packages.gpg | apt-key add -
           apt update</pre>
@@ -281,16 +324,14 @@ jobs:
           user_email: 'github-actions[bot]@users.noreply.github.com'
           commit_message: 'Update APT repository'
 
-      - name: Create GitHub Release with packages
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           RELEASE_TAG="packages-$(date '+%Y.%m.%d-%H%M')"
-
           gh release create "$RELEASE_TAG" \
             --title "FL_IDE Packages - $(date '+%Y-%m-%d %H:%M')" \
-            --notes "Built for com.yato.fl_ide — architectures: aarch64, arm, x86_64, i686" \
-            || echo "[!] Release tag exists, skipping create"
-
+            --notes "Built for com.yato.fl_ide — aarch64, arm, x86_64, i686" \
+            || echo "[!] Release tag exists, skipping"
           find apt-repo/pool/main -name "*.deb" -exec gh release upload "$RELEASE_TAG" {} \; || true
           echo "[*] Done: $RELEASE_TAG"
