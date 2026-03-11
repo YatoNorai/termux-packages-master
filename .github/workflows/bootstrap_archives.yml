@@ -15,7 +15,7 @@ jobs:
   build:
     permissions:
       contents: read # actions/upload-artifact doesn't need contents: write
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         arch:
@@ -27,29 +27,39 @@ jobs:
     # if: github.repository == 'termux/termux-packages'
     steps:
       - name: Git clone
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
+      
+      - name: Fix script permissions
+        run: |
+          chmod +x scripts/*.sh
+          chmod +x *.sh
+      
       - name: Create bootstrap archive
         run: ./scripts/generate-bootstraps.sh --architectures ${{ matrix.arch }}
+      
       - name: Store artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: bootstrap-archives-${{ matrix.arch }}-${{ github.sha }}
           path: "*.zip"
+  
   publish:
     permissions:
       contents: write # for git push
     needs: build
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     steps:
       - name: Git clone
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      
       - name: Fetch bootstrap archives
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v4
         with:
           merge-multiple: true
           path: ./
+      
       - name: Create new tag
         id: get_tag
         run: |
@@ -62,6 +72,7 @@ jobs:
           fi
           new_tag="${new_tag}-r${tag_rev}+apt.android-7"
           echo "tag_name=$new_tag" >> $GITHUB_OUTPUT
+      
       - name: Publish bootstrap zips to GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
