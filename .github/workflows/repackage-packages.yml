@@ -39,9 +39,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             curl wget \
-            dpkg-deb \
+            dpkg \
             gzip xz-utils \
-            jq
+            jq \
+            file
       
       - name: Determine packages to process
         id: pkgs
